@@ -163,6 +163,9 @@ func (r *ClusterResourceSetReconciler) reconcileDelete(ctx context.Context, clus
 	log := ctrl.LoggerFrom(ctx)
 
 	for _, cluster := range clusters {
+		if err := r.DeleteClusterResourceSet(ctx, cluster, crs); err != nil {
+			return ctrl.Result{}, err
+		}
 		clusterResourceSetBinding := &addonsv1.ClusterResourceSetBinding{}
 		clusterResourceSetBindingKey := client.ObjectKey{
 			Namespace: cluster.Namespace,
@@ -298,11 +301,11 @@ func (r *ClusterResourceSetReconciler) ApplyClusterResourceSet(ctx context.Conte
 			LastAppliedTime: &metav1.Time{Time: time.Now().UTC()},
 		})
 
-		if err := r.patchOwnerRefToResource(ctx, clusterResourceSet, unstructuredObj); err != nil {
-			log.Error(err, "Failed to patch ClusterResourceSet as resource owner reference",
-				"Resource type", unstructuredObj.GetKind(), "Resource name", unstructuredObj.GetName())
-			errList = append(errList, err)
-		}
+		// if err := r.patchOwnerRefToResource(ctx, clusterResourceSet, unstructuredObj); err != nil {
+		// 	log.Error(err, "Failed to patch ClusterResourceSet as resource owner reference",
+		// 		"Resource type", unstructuredObj.GetKind(), "Resource name", unstructuredObj.GetName())
+		// 	errList = append(errList, err)
+		// }
 
 		// Since maps are not ordered, we need to order them to get the same hash at each reconcile.
 		keys := make([]string, 0)
@@ -342,6 +345,136 @@ func (r *ClusterResourceSetReconciler) ApplyClusterResourceSet(ctx context.Conte
 			data := dataList[i]
 
 			if err := apply(ctx, remoteClient, data); err != nil {
+				isSuccessful = false
+				log.Error(err, "failed to apply ClusterResourceSet resource", "Resource kind", resource.Kind, "Resource name", resource.Name)
+				conditions.MarkFalse(clusterResourceSet, addonsv1.ResourcesAppliedCondition, addonsv1.ApplyFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
+				errList = append(errList, err)
+			}
+		}
+
+		resourceSetBinding.SetBinding(addonsv1.ResourceBinding{
+			ResourceRef:     resource,
+			Hash:            computeHash(dataList),
+			Applied:         isSuccessful,
+			LastAppliedTime: &metav1.Time{Time: time.Now().UTC()},
+		})
+	}
+	if len(errList) > 0 {
+		return kerrors.NewAggregate(errList)
+	}
+
+	conditions.MarkTrue(clusterResourceSet, addonsv1.ResourcesAppliedCondition)
+
+	return nil
+}
+
+func (r *ClusterResourceSetReconciler) DeleteClusterResourceSet(ctx context.Context, cluster *clusterv1.Cluster, clusterResourceSet *addonsv1.ClusterResourceSet) error {
+	log := ctrl.LoggerFrom(ctx, "cluster", cluster.Name)
+
+	remoteClient, err := r.Tracker.GetClient(ctx, util.ObjectKey(cluster))
+	if err != nil {
+		conditions.MarkFalse(clusterResourceSet, addonsv1.ResourcesAppliedCondition, addonsv1.RemoteClusterClientFailedReason, clusterv1.ConditionSeverityError, err.Error())
+		return err
+	}
+
+	// Get ClusterResourceSetBinding object for the cluster.
+	clusterResourceSetBinding, err := r.getOrCreateClusterResourceSetBinding(ctx, cluster, clusterResourceSet)
+	if err != nil {
+		return err
+	}
+
+	// Initialize the patch helper.
+	patchHelper, err := patch.NewHelper(clusterResourceSetBinding, r.Client)
+	if err != nil {
+		return err
+	}
+
+	defer func() {
+		// Always attempt to Patch the ClusterResourceSetBinding object after each reconciliation.
+		if err := patchHelper.Patch(ctx, clusterResourceSetBinding); err != nil {
+			log.Error(err, "failed to patch config")
+		}
+	}()
+
+	errList := []error{}
+	resourceSetBinding := clusterResourceSetBinding.GetOrCreateBinding(clusterResourceSet)
+
+	// Iterate all resources and apply them to the cluster and update the resource status in the ClusterResourceSetBinding object.
+	for _, resource := range clusterResourceSet.Spec.Resources {
+		// If resource is already applied successfully and clusterResourceSet mode is "ApplyOnce", continue. (No need to check hash changes here)
+		if resourceSetBinding.IsApplied(resource) {
+			continue
+		}
+
+		unstructuredObj, err := r.getResource(ctx, resource, cluster.GetNamespace())
+		if err != nil {
+			if err == ErrSecretTypeNotSupported {
+				conditions.MarkFalse(clusterResourceSet, addonsv1.ResourcesAppliedCondition, addonsv1.WrongSecretTypeReason, clusterv1.ConditionSeverityWarning, err.Error())
+			} else {
+				conditions.MarkFalse(clusterResourceSet, addonsv1.ResourcesAppliedCondition, addonsv1.RetrievingResourceFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
+
+				// Continue without adding the error to the aggregate if we can't find the resource.
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+			}
+			errList = append(errList, err)
+			continue
+		}
+
+		// Set status in ClusterResourceSetBinding in case of early continue due to a failure.
+		// Set only when resource is retrieved successfully.
+		resourceSetBinding.SetBinding(addonsv1.ResourceBinding{
+			ResourceRef:     resource,
+			Hash:            "",
+			Applied:         false,
+			LastAppliedTime: &metav1.Time{Time: time.Now().UTC()},
+		})
+
+		// if err := r.patchOwnerRefToResource(ctx, clusterResourceSet, unstructuredObj); err != nil {
+		// 	log.Error(err, "Failed to patch ClusterResourceSet as resource owner reference",
+		// 		"Resource type", unstructuredObj.GetKind(), "Resource name", unstructuredObj.GetName())
+		// 	errList = append(errList, err)
+		// }
+
+		// Since maps are not ordered, we need to order them to get the same hash at each reconcile.
+		keys := make([]string, 0)
+		data, ok := unstructuredObj.UnstructuredContent()["data"]
+		if !ok {
+			errList = append(errList, errors.New("failed to get data field from the resource"))
+			continue
+		}
+
+		unstructuredData := data.(map[string]interface{})
+		for key := range unstructuredData {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+
+		dataList := make([][]byte, 0)
+		for _, key := range keys {
+			val, ok, err := unstructured.NestedString(unstructuredData, key)
+			if !ok || err != nil {
+				errList = append(errList, errors.New("failed to get value field from the resource"))
+				continue
+			}
+
+			byteArr := []byte(val)
+			// If the resource is a Secret, data needs to be decoded.
+			if unstructuredObj.GetKind() == string(addonsv1.SecretClusterResourceSetResourceKind) {
+				byteArr, _ = base64.StdEncoding.DecodeString(val)
+			}
+
+			dataList = append(dataList, byteArr)
+		}
+
+		// Apply all values in the key-value pair of the resource to the cluster.
+		// As there can be multiple key-value pairs in a resource, each value may have multiple objects in it.
+		isSuccessful := true
+		for i := range dataList {
+			data := dataList[i]
+
+			if err := delete(ctx, remoteClient, data); err != nil {
 				isSuccessful = false
 				log.Error(err, "failed to apply ClusterResourceSet resource", "Resource kind", resource.Kind, "Resource name", resource.Name)
 				conditions.MarkFalse(clusterResourceSet, addonsv1.ResourcesAppliedCondition, addonsv1.ApplyFailedReason, clusterv1.ConditionSeverityWarning, err.Error())

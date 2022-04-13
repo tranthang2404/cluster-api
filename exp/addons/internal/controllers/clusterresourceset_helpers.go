@@ -108,6 +108,55 @@ func applyUnstructured(ctx context.Context, c client.Client, obj *unstructured.U
 	return nil
 }
 
+func delete(ctx context.Context, c client.Client, data []byte) error {
+	isJSONList, err := isJSONList(data)
+	if err != nil {
+		return err
+	}
+	objs := []unstructured.Unstructured{}
+	// If it is a json list, convert each list element to an unstructured object.
+	if isJSONList {
+		var results []map[string]interface{}
+		// Unmarshal the JSON to the interface.
+		if err = json.Unmarshal(data, &results); err == nil {
+			for i := range results {
+				var u unstructured.Unstructured
+				u.SetUnstructuredContent(results[i])
+				objs = append(objs, u)
+			}
+		}
+	} else {
+		// If it is not a json list, data is either json or yaml format.
+		objs, err = utilyaml.ToUnstructured(data)
+		if err != nil {
+			return errors.Wrapf(err, "failed converting data to unstructured objects")
+		}
+	}
+
+	errList := []error{}
+	sortedObjs := utilresource.SortForCreate(objs)
+	for i := range sortedObjs {
+		if err := deleteUnstructured(ctx, c, &objs[i]); err != nil {
+			errList = append(errList, err)
+		}
+	}
+	return kerrors.NewAggregate(errList)
+}
+
+func deleteUnstructured(ctx context.Context, c client.Client, obj *unstructured.Unstructured) error {
+	// Create the object on the API server.
+	// TODO: Errors are only logged. If needed, exponential backoff or requeuing could be used here for remedying connection glitches etc.
+	if err := c.Delete(ctx, obj); err != nil {
+		return errors.Wrapf(
+			err,
+			"failed to delete object %s %s/%s",
+			obj.GroupVersionKind(),
+			obj.GetNamespace(),
+			obj.GetName())
+	}
+	return nil
+}
+
 // getOrCreateClusterResourceSetBinding retrieves ClusterResourceSetBinding resource owned by the cluster or create a new one if not found.
 func (r *ClusterResourceSetReconciler) getOrCreateClusterResourceSetBinding(ctx context.Context, cluster *clusterv1.Cluster, clusterResourceSet *addonsv1.ClusterResourceSet) (*addonsv1.ClusterResourceSetBinding, error) {
 	clusterResourceSetBinding := &addonsv1.ClusterResourceSetBinding{}
