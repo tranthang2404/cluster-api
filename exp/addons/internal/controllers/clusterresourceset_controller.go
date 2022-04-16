@@ -377,34 +377,34 @@ func (r *ClusterResourceSetReconciler) DeleteClusterResourceSet(ctx context.Cont
 		return err
 	}
 
-	// Get ClusterResourceSetBinding object for the cluster.
-	clusterResourceSetBinding, err := r.getOrCreateClusterResourceSetBinding(ctx, cluster, clusterResourceSet)
-	if err != nil {
-		return err
-	}
+	// // Get ClusterResourceSetBinding object for the cluster.
+	// clusterResourceSetBinding, err := r.getOrCreateClusterResourceSetBinding(ctx, cluster, clusterResourceSet)
+	// if err != nil {
+	// 	return err
+	// }
 
-	// Initialize the patch helper.
-	patchHelper, err := patch.NewHelper(clusterResourceSetBinding, r.Client)
-	if err != nil {
-		return err
-	}
+	// // Initialize the patch helper.
+	// patchHelper, err := patch.NewHelper(clusterResourceSetBinding, r.Client)
+	// if err != nil {
+	// 	return err
+	// }
 
-	defer func() {
-		// Always attempt to Patch the ClusterResourceSetBinding object after each reconciliation.
-		if err := patchHelper.Patch(ctx, clusterResourceSetBinding); err != nil {
-			log.Error(err, "failed to patch config")
-		}
-	}()
+	// defer func() {
+	// 	// Always attempt to Patch the ClusterResourceSetBinding object after each reconciliation.
+	// 	if err := patchHelper.Patch(ctx, clusterResourceSetBinding); err != nil {
+	// 		log.Error(err, "failed to patch config")
+	// 	}
+	// }()
 
 	errList := []error{}
-	resourceSetBinding := clusterResourceSetBinding.GetOrCreateBinding(clusterResourceSet)
+	// resourceSetBinding := clusterResourceSetBinding.GetOrCreateBinding(clusterResourceSet)
 
 	// Iterate all resources and apply them to the cluster and update the resource status in the ClusterResourceSetBinding object.
 	for _, resource := range clusterResourceSet.Spec.Resources {
 		// If resource is already applied successfully and clusterResourceSet mode is "ApplyOnce", continue. (No need to check hash changes here)
-		if resourceSetBinding.IsApplied(resource) {
-			continue
-		}
+		// if resourceSetBinding.IsApplied(resource) {
+		// 	continue
+		// }
 
 		unstructuredObj, err := r.getResource(ctx, resource, cluster.GetNamespace())
 		if err != nil {
@@ -424,12 +424,12 @@ func (r *ClusterResourceSetReconciler) DeleteClusterResourceSet(ctx context.Cont
 
 		// Set status in ClusterResourceSetBinding in case of early continue due to a failure.
 		// Set only when resource is retrieved successfully.
-		resourceSetBinding.SetBinding(addonsv1.ResourceBinding{
-			ResourceRef:     resource,
-			Hash:            "",
-			Applied:         false,
-			LastAppliedTime: &metav1.Time{Time: time.Now().UTC()},
-		})
+		// resourceSetBinding.SetBinding(addonsv1.ResourceBinding{
+		// 	ResourceRef:     resource,
+		// 	Hash:            "",
+		// 	Applied:         false,
+		// 	LastAppliedTime: &metav1.Time{Time: time.Now().UTC()},
+		// })
 
 		// if err := r.patchOwnerRefToResource(ctx, clusterResourceSet, unstructuredObj); err != nil {
 		// 	log.Error(err, "Failed to patch ClusterResourceSet as resource owner reference",
@@ -470,24 +470,24 @@ func (r *ClusterResourceSetReconciler) DeleteClusterResourceSet(ctx context.Cont
 
 		// Apply all values in the key-value pair of the resource to the cluster.
 		// As there can be multiple key-value pairs in a resource, each value may have multiple objects in it.
-		isSuccessful := true
+		// isSuccessful := true
 		for i := range dataList {
 			data := dataList[i]
 
 			if err := delete(ctx, remoteClient, data); err != nil {
-				isSuccessful = false
+				// isSuccessful = false
 				log.Error(err, "failed to apply ClusterResourceSet resource", "Resource kind", resource.Kind, "Resource name", resource.Name)
 				conditions.MarkFalse(clusterResourceSet, addonsv1.ResourcesAppliedCondition, addonsv1.ApplyFailedReason, clusterv1.ConditionSeverityWarning, err.Error())
 				errList = append(errList, err)
 			}
 		}
 
-		resourceSetBinding.SetBinding(addonsv1.ResourceBinding{
-			ResourceRef:     resource,
-			Hash:            computeHash(dataList),
-			Applied:         isSuccessful,
-			LastAppliedTime: &metav1.Time{Time: time.Now().UTC()},
-		})
+		// resourceSetBinding.SetBinding(addonsv1.ResourceBinding{
+		// 	ResourceRef:     resource,
+		// 	Hash:            computeHash(dataList),
+		// 	Applied:         isSuccessful,
+		// 	LastAppliedTime: &metav1.Time{Time: time.Now().UTC()},
+		// })
 	}
 	if len(errList) > 0 {
 		return kerrors.NewAggregate(errList)
