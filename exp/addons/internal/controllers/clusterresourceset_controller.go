@@ -163,9 +163,8 @@ func (r *ClusterResourceSetReconciler) reconcileDelete(ctx context.Context, clus
 	log := ctrl.LoggerFrom(ctx)
 
 	for _, cluster := range clusters {
-		if err := r.DeleteClusterResourceSet(ctx, cluster, crs); err != nil {
-			return ctrl.Result{}, err
-		}
+		// delete resource on target cluster( best effor)
+		r.DeleteClusterResourceSet(ctx, cluster, crs)
 		clusterResourceSetBinding := &addonsv1.ClusterResourceSetBinding{}
 		clusterResourceSetBindingKey := client.ObjectKey{
 			Namespace: cluster.Namespace,
